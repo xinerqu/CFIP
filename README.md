@@ -4,7 +4,7 @@
 >
 > 作者：**卡马尔冰雨**
 
-专门给 Cloudflare 优选 IP 做的测速工具。Windows 绿色版，解压双击就能用。
+专门给 Cloudflare 优选 IP (edgetunnel)做的测速工具。Windows 绿色版，解压双击就能用。
 
 它不是又一个「ping 一下、跑个 curl」的脚本。它要解决的是传统优选工具一直没解决的两件事。
 
