@@ -4,7 +4,7 @@
 >
 > 作者：**卡马尔冰雨**
 
-专门给 Cloudflare 优选 IP (edgetunnel)做的测速工具。Windows 绿色版，解压双击就能用。
+专门给 Cloudflare 优选 IP 做的测速工具。Windows 绿色版，解压双击就能用。
 
 它不是又一个「ping 一下、跑个 curl」的脚本。它要解决的是传统优选工具一直没解决的两件事。
 
@@ -96,7 +96,7 @@ error code: 1034
 | 带宽口径 | 单流，被 BDP 卡死，系统性低估 | 多流并行聚合，可配 1~16 |
 | 结果稳定性 | 单次测量，名次随机颠倒 | 重复测量取中位数，波动大主动提示 |
 | 是否覆盖回源段 | 不覆盖 | 可覆盖（走自己的 Worker） |
-| IP 从哪来 | 自己找、自己筛 | 内置 4 个 IP 库随机生成 |
+| IP 从哪来 | 自己找、自己筛 | 内置 9 个 IP 库随机生成（含 5 个地区库） |
 | 端口 | 只能 443 | 443 / 2053 / 2083 / 2087 / 2096 / 8443，可任意可指定 |
 | 运行环境 | 常要 PowerShell 7 / Python / curl | 单 exe + 两个 DLL，双击就跑 |
 
@@ -152,7 +152,7 @@ GET  /  HTTP/1.1
 
 ## 下载与运行
 
-到本仓库右侧的 **Releases** 页面，下载 `cfip_gui.zip`，解压后得到四个文件：
+到本仓库右侧的 **Releases** 页面，下载 `cfip_gui.zip`，解压后得到五个文件：
 
 | 文件 | 必需 | 说明 |
 |---|---|---|
@@ -160,10 +160,13 @@ GET  /  HTTP/1.1
 | `libssl-3-x64.dll` | ✅ | OpenSSL 运行库，缺了报 0xC0000135 |
 | `libcrypto-3-x64.dll` | ✅ | OpenSSL 运行库，同上 |
 | `worker_速度端点.js` | ⬜ | 可选。要用「测真实路径」才需要，见下一节 |
+| `README-worker.md` | ⬜ | 可选。只讲 `worker_速度端点.js` 怎么粘的单独说明，比本节更细 |
 
-**四个放同一个文件夹，双击 `cfip_gui.exe`。**
+**必需的那三个放同一个文件夹，双击 `cfip_gui.exe`。**
 
 > 除了这两个 OpenSSL DLL，没有任何其它依赖：不需要 .NET、不需要 VC 运行库、不需要 PowerShell、不写注册表、不写系统目录。Windows 7 SP1 及以上都能跑。
+>
+> 输出文件（`good_ips.txt`）和输入的 `ips.txt` 都按 **exe 所在目录**解析 —— 相对路径不会跑到「当前工作目录」去。
 
 ### 第一次打开
 
@@ -206,6 +209,8 @@ GET  /  HTTP/1.1
 这一节是整份文档最详细的部分，因为它是整个「测真实速度」功能的前提。
 
 **如果你只想用内置静态源测速，这一节可以完全跳过。**
+
+> 想看得更细（含排错表、参数表、12 条常见问题），同一个 zip 里还有一份只讲这件事的 [`README-worker.md`](README-worker.md)。
 
 ### 这个东西是干什么的
 
@@ -532,9 +537,11 @@ Cloudflare 免费版每天 10 万次请求额度。跑 20 个 IP、每个重复 
 
 **这才是你刷 YouTube 时真正能拿到的上限。** 传统工具给不了你这个数字，因为它压根不测这一段。
 
-### 6. 内置 4 个 IP 库，不用自己找 IP
+### 6. 内置 9 个 IP 库，不用自己找 IP
 
 不用再去 TG 群里求 IP 列表了。
+
+**通用库（从 CIDR 段里随机生成地址）**
 
 | 库 | 数据源 | 内容 |
 |---|---|---|
@@ -543,7 +550,19 @@ Cloudflare 免费版每天 10 万次请求额度。跑 20 个 IP、每个重复 
 | AS209242列表v4 | ipverse AS209242 | Cloudflare 另一组 ASN 段 |
 | CF官方列表v4 | 实时 CF 官方端点 | CF 当前公布的段 |
 
-选一个库、填数量、点「生成」，程序会从 CIDR 里随机抽 IP。抽的时候会跳过网络地址和广播地址（这点比 edgetunnel 原版更严谨）。
+**地区库（BestCF 整理好的现成 IP，直接抽行）**
+
+| 库 | 数据源 | 规模 |
+|---|---|---|
+| 日本 JP（地区库） | `bestcf.pages.dev/random-region/JP/all.txt` | 约 320 条 |
+| 香港 HK（地区库） | `bestcf.pages.dev/random-region/HK/all.txt` | 约 110 条 |
+| 台湾 TW（地区库） | `bestcf.pages.dev/random-region/TW/all.txt` | 约 14 条 |
+| 美国 US（地区库） | `bestcf.pages.dev/random-region/US/all.txt` | 约 1300 条 |
+| 新加坡 SG（地区库） | `bestcf.pages.dev/random-region/SG/all.txt` | 约 410 条 |
+
+前四个是从 CIDR 里随机抽 IP，抽的时候会跳过网络地址和广播地址（这点比 edgetunnel 原版更严谨）。后五个是从 BestCF 已经整理好的地区列表里直接抽行 —— 那些行本身就带着 `ip:port`，所以「端口」下拉选「任意」时会沿用列表自带的端口，只有你显式指定了某个端口才覆盖。
+
+地区库的好处：这些 IP 是别人已经筛过一轮、确认落在对应地区的，比自己从 AS13335 全段里瞎抽命中率高得多。想要 JP/HK/TW 的低延迟，直接从对应地区库里抽最省事。
 
 ### 7. 端口可选，而且是真随机
 
@@ -659,6 +678,7 @@ TCP 连接另有一层更短的超时：`min(2000ms, --timeout)`。
 | 必须服务此域名 | 默认勾选。**这是第一道过滤，不建议关** |
 | 排序 | 按速度降序 / 按延迟升序 |
 | 停止 / 开始测试 | 按钮 |
+| 检查更新 | 手动查一次 GitHub 上有没有新版本（窗口启动时也会静默查一次，只有真出新版才提示） |
 
 **第二行：测速方式与时间参数**
 
@@ -686,10 +706,10 @@ TCP 连接另有一层更短的超时：`min(2000ms, --timeout)`。
 
 | 控件 | 说明 |
 |---|---|
-| IP来源 | 下拉。`本地列表文件` 或 4 个 IP 库之一。**选库时文件框自动禁用，反向亦然** |
-| 文件框 + 浏览 | 只在「本地列表文件」时可用 |
+| IP来源 | 下拉。`本地列表文件` 或 9 个 IP 库之一（4 个通用库 + 5 个地区库）。**选库时文件框自动禁用，反向亦然** |
+| 文件框 + 浏览 | 只在「本地列表文件」时可用。相对路径按 exe 同目录解析 |
 | 数量 | 从库随机生成几个 |
-| 端口 | 任意 / 443 / 2053 / 2083 / 2087 / 2096 / 8443 |
+| 端口 | 任意 / 443 / 2053 / 2083 / 2087 / 2096 / 8443。地区库选「任意」时沿用列表自带端口 |
 | 生成 | 只生成填进列表，不测速 |
 
 **第五~七行：过滤、输出**
@@ -704,13 +724,13 @@ TCP 连接另有一层更短的超时：`min(2000ms, --timeout)`。
 
 **右下角署名**
 
-`卡马尔冰雨 制作 · v1.5`，蓝字。点一下弹出「关于」框。
+`卡马尔冰雨 制作 · v1.6`，蓝字。点一下弹出「关于」框。
 
 ---
 
 ## 命令行参考
 
-GUI 里所有功能命令行都有。`cfip_gui.exe --cli --help` 会打印完整的 99 行说明。
+GUI 里所有功能命令行都有。`cfip_gui.exe --cli --help` 会打印完整说明。
 
 ### 常用示例
 
@@ -732,6 +752,13 @@ cfip_gui.exe --cli --domain abc.example.com --ipfile ips.txt ^
 :: 换一条回源线路重试（线路 3 = Google 静态 CDN）
 cfip_gui.exe --cli --domain abc.example.com --ipfile ips.txt --realpath ^
   --upstream 3 --threads 1 --repeat 5 --timelimit 15
+
+:: 从日本地区库随机抽 20 个
+cfip_gui.exe --cli --domain abc.example.com --iplib 5 --ipcount 20 ^
+  --threads 1 --repeat 2 --sort speed
+
+:: 检查有没有新版本
+cfip_gui.exe --checkupdate
 ```
 
 ### 参数速查
@@ -739,12 +766,12 @@ cfip_gui.exe --cli --domain abc.example.com --ipfile ips.txt --realpath ^
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--domain NAME` | 必填 | SNI 与 Host |
-| `--ipfile FILE` | ips.txt | IP 列表文件 |
-| `--iplib N` | 0 | 1~4 用内置库，不用文件 |
+| `--ipfile FILE` | ips.txt | IP 列表文件（相对路径按 exe 同目录） |
+| `--iplib N` | 0 | 1~9 用内置库，不用文件（1~4 通用库，5~9 地区库 JP/HK/TW/US/SG） |
 | `--ipcount N` | 20 | 配合 `--iplib` |
 | `--libport N` | 0 | 0=任意，或指定端口 |
 | `--port N` | 443 | 列表里没写端口时的缺省 |
-| `--outfile FILE` | good_ips.txt | 结果文件 |
+| `--outfile FILE` | good_ips.txt | 结果文件（相对路径按 exe 同目录） |
 | `--threads N` | 32 | 同时测几个 IP |
 | `--streams N` | 4 | 每个 IP 开几条连接 |
 | `--timeout MS` | 1000 | 单 IP 超时 |
@@ -766,6 +793,7 @@ cfip_gui.exe --cli --domain abc.example.com --ipfile ips.txt --realpath ^
 | `--allownodl` | 关 | 无下载体也算通过 |
 | `--norequirezone` | 关 | 不要求 IP 服务此域名 |
 | `--quiet` | 关 | 只写文件不打印明细 |
+| `--checkupdate` | — | 检查 GitHub 上的新版本（等同 `--version`） |
 | `--debug` | 关 | 打印每条详细诊断 |
 | `--trace` | 关 | 打印内部状态流转 |
 
@@ -875,10 +903,20 @@ UTF-8，没有 BOM。Windows 记事本打开可能显示乱码，用 VS Code / N
 
 ## 更新日志
 
+### v1.6
+
+- **新增「检查更新」按钮**：点一下就去 GitHub 查最新 release，有新版本直接给下载页链接，点「是」自动打开浏览器。窗口启动时也会静默查一次，**只有真出新版本才弹框**，平时不打扰。
+- **结果文件改为输出到 exe 同目录**：以前相对路径（如 `good_ips.txt`）会落到「当前工作目录」，从快捷方式启动或从别的目录调用时会跑到上层目录去找不到。现在所有相对路径的输入（`ips.txt`）和输出（`good_ips.txt`）都按 **exe 所在目录**解析，绝对路径照旧。CLI 结束时会打印实际写入的绝对路径。
+- **新增 5 个按地区划分的 IP 库**：日本 JP / 香港 HK / 台湾 TW / 美国 US / 新加坡 SG，数据源是 BestCF 的 `random-region` 列表。这些是别人已经筛过一轮、确认落在对应地区的现成 IP，行内自带端口，抽中率比自己从 AS13335 全段乱抽高得多。
+  - 端口选「任意」时沿用列表自带的端口，显式指定端口才覆盖。
+- 命令行新增 `--checkupdate`（等同 `--version`），GUI 新增 `检查更新` 按钮
+- `--iplib` 取值范围扩到 1~9（1~4 通用库，5~9 地区库）
+- 命令行参数解析改为从 `argv[1]` 起扫，`cfip_gui.exe --version` 可单独使用（以前必须先写 `--cli`）
+
 ### v1.5
 
 - 新增「回源线路」下拉，可切换 4 条上游分别对比
-- 新增「IP 来源」合并下拉：本地文件 / 4 个内置 IP 库
+- 新增「IP 来源」合并下拉：本地文件 / 内置 IP 库
 - 新增 IP 库随机生成时的端口选择（任意 / 6 个具体端口）
 - 新增机房（IATA）与国家代码列，结果带 `#SG1` 序号
 - 新增重复测量取中位数，极差过大主动提示
@@ -893,5 +931,5 @@ UTF-8，没有 BOM。Windows 记事本打开可能显示乱码，用 VS Code / N
 ## 致谢
 
 - TLS 使用 [OpenSSL](https://www.openssl.org/)（Apache License 2.0）
-- IP 库数据源：[cmliu](https://github.com/cmliu/cmliu)、[ipverse](https://github.com/ipverse/asn-ip)
+- IP 库数据源：[cmliu](https://github.com/cmliu/cmliu)、[ipverse](https://github.com/ipverse/asn-ip)、[BestCF](https://bestcf.pages.dev/)
 - 回源测速思路参考 edgetunnel / BestCF 的在线优选设计
