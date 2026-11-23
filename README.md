@@ -161,7 +161,7 @@ GET  /  HTTP/1.1
 | `cfip_gui.exe` | ✅ | 主程序，双击运行 |
 | `libssl-3-x64.dll` | ✅ | OpenSSL 运行库，缺了报 0xC0000135 |
 | `libcrypto-3-x64.dll` | ✅ | OpenSSL 运行库，同上 |
-| `worker_速度端点.js` | ⬜ | 可选。要用「测真实路径」才需要，见下一节。**v1.8 起不用自己手贴了，程序能一键注入（v1.9 起还会自动纠正文件编码）** |
+| `worker_速度端点.js` | ⬜ | 可选。要用「测真实路径」或「generate_204 延迟口径」才需要，见下一节。**v1.8 起不用自己手贴了，程序能一键注入（v1.9 起还会自动纠正文件编码）** |
 | `README-worker.md` | ⬜ | 可选。只讲 `worker_速度端点.js` 原理和排错的单独说明，比本节更细 |
 
 **必需的那三个放同一个文件夹，双击 `cfip_gui.exe`。**
@@ -278,11 +278,15 @@ cfip_gui.exe --inject C:\path\_worker.js --injectout C:\path\worker_new.js
 ```js
 // ====================== 测速端点开始 ======================
 // 这一段是 CFIP 优选IP测速 自动插入的，位置就在 async fetch(...) { 的下一行。
-// 你不用改它，也不用管它；它只响应 /__speed 这一个路径，其它请求原样放行。
+// 你不用改它，也不用管它；它只响应 /__gen204 和 /__speed 两个路径，其它请求原样放行。
 {
   const 测速URL = new URL(request.url);
+  if (测速URL.pathname.toLowerCase() === '/__gen204') {
+    ...  // 回源 gstatic 的 generate_204，用来测和 clash 同口径的延迟
+    return new Response(null, { status: 204, ... });
+  }
   if (测速URL.pathname.toLowerCase() === '/__speed') {
-    ...
+    ...  // 回源 Google CDN 大文件，用来测速度
     return new Response(...);
   }
 }
@@ -333,6 +337,25 @@ X-Upstream-Landed: rr1---sn-oj5hn5-5t.gvt1.com
 ```
 
 `X-Upstream-Mode` 告诉你走的哪条线路（`gvt1-video-cdn` 或 `dl.google.com`），`X-Upstream-Landed` 告诉你实际落到了哪个 CDN 节点。
+
+再验证一下延迟端点（v2.0 新增）：
+
+```bash
+curl -s -o NUL -D - "https://你的域名/__gen204"
+```
+
+应该看到：
+
+```
+HTTP/2 204
+x-g204-status: 204
+x-upstream-ms: 23
+```
+
+- `x-g204-status`：Worker 回源 gstatic 拿到的状态码，正常是 `204`。
+- `x-upstream-ms`：Worker 那一段（出网 → gstatic → 返回）花了多少毫秒，正常 15~50ms。
+
+这个端点就是「generate_204（同 clash）」延迟口径的实现。没有它，工具只能用 TLS 握手口径。
 
 **如果返回 404 或者 613 字节的 nginx 欢迎页** → 这段 JS 没生效，或者插到了 Worker 作用域外面。重新注入一次。
 
@@ -585,17 +608,30 @@ const 目标端口 = 指定端口 === -1 ? cfport[Math.floor(Math.random() * cfp
 
 **同机房内 IP 差异只有 3%~8%，跨机房差异可能是几倍。** 所以按国家/机房分组看，比混着排更有意义。
 
-### 9. 延迟口径可选
+### 9. 延迟口径可选（四种）
 
-三个口径，对应三种不同的体感：
-
-| 口径 | 测的是什么 | 典型值 |
+| 口径 | 测的是什么 | 本机实测典型值 |
 |---|---|---|
-| TCP 连接 | 只到 TCP 三次握手完成 | ~110ms |
-| TLS 握手完成 | 到 TLS 握手结束（和你 clash 里看到的延迟最接近） | ~780ms |
-| 首字节 TTFB | 到 HTTP 响应的第一个字节 | ~730ms |
+| **generate_204（同 clash）** | 本机 → CF 边缘 → 你的 Worker → `gstatic.com/generate_204` → 一路返回 | **615 ~ 1160ms** |
+| TCP 连接 | 只到 TCP 三次握手完成 | ~0~10ms（见下方警告） |
+| TLS 握手完成 | 到 TLS 握手结束 | ~580 ~ 920ms |
+| 首字节 TTFB | 到 HTTP 响应的第一个字节 | ~200 ~ 290ms |
 
-默认选 TLS 握手。
+**默认是「generate_204（同 clash）」。**
+
+为什么加这个口径：clash、mihomo、Shadowrocket、Surge 这些代理工具给节点测延迟，用的都是 `https://www.gstatic.com/generate_204`——请求打到节点，节点帮你回源 gstatic 拿那个 204，往返一次算延迟。本工具默认口径也走完全相同的路径：Worker 上加了 `/__gen204` 端点，它内部 `fetch('https://www.gstatic.com/generate_204')` 再返回 204。所以你在本工具里看到的数字，和你在 clash 面板里点「测延迟」看到的数字是同一个东西。
+
+实测中 Worker 回源 gstatic 那一段只多花 18~47ms，可以忽略；之所以数字是几百上千毫秒，是因为它包含了「本机 → CF 边缘」这一整段真实链路。
+
+**其它三个口径的定位**：
+
+- **TCP 连接**：看着延迟极低（0~10ms），但**失真**。如果你的网络前面有路由器/网关级代理或透明代理，SYN 会被本地代答，测出来是假数字。只适合排查「这个 IP 到底能不能连」。
+- **TLS 握手完成**：只测到 CF 边缘的 TLS 握手，不含 Worker 执行与回源。比 generate_204 小，比 TTFB 大。
+- **首字节 TTFB**：只到 CF 边缘吐第一个字节，同样不含 Worker 回源。
+
+**只有 generate_204 是端到端的**（它能反映「这个 IP 在你实际使用中快不快」），其余三个都是链路上某一段的切片。所以除非你在排查具体问题，否则保持默认。
+
+**代价**：generate_204 需要你的 Worker 上加过 `/__gen204` 端点，而且要填域名。如果你的 Worker 还没加端點（或不想加），程序会退回用 TLS 握手口径——不会因为拿不到 204 就把这个 IP 判死。
 
 ### 10. 超时是两层的
 
@@ -729,7 +765,7 @@ TCP 连接另有一层更短的超时：`min(2000ms, --timeout)`。
 | 重复 | 每个 IP 测几次取中位数，默认 1（建议 3） |
 | 线程数 | 同时测几个 IP，默认 32（测排序建议 1） |
 | 超时ms | 单 IP 超时，默认 1000（真实路径建议 5000） |
-| 延迟口径 | TCP 连接 / TLS 握手 / 首字节 |
+| 延迟口径 | **generate_204（同clash）** / TCP 连接 / TLS 握手 / TTFB，默认第一个 |
 
 **第三行：回源与协议**
 
@@ -771,7 +807,7 @@ TCP 连接另有一层更短的超时：`min(2000ms, --timeout)`。
 
 **右下角署名**
 
-`卡马尔冰雨 制作 · v1.9`，蓝字。点一下弹出「关于」框。
+`卡马尔冰雨 制作 · v2.0`，蓝字。点一下弹出「关于」框。
 
 ---
 
@@ -831,7 +867,7 @@ cfip_gui.exe --checkupdate
 | `--codes LIST` | 200,301,302,400,403,404 | 可接受状态码 |
 | `--maxdelay MS` | 0 | 延迟上限，0=不启用 |
 | `--minspeed MBPS` | 0 | 速度下限，0=不启用 |
-| `--delaymode M` | tls | tcp / tls / ttfb |
+| `--delaymode M` | w204 | w204 / tcp / tls / ttfb |
 | `--sort MODE` | speed | speed / delay |
 | `--template T` | 见上文 | 输出模板 |
 | `--realpath` | 关 | 测真实路径 |
@@ -973,6 +1009,32 @@ UTF-8，没有 BOM。Windows 记事本打开可能显示乱码，用 VS Code / N
 ---
 
 ## 更新日志
+
+### v2.0
+
+**这一版只加了一件事：延迟数值和你在 clash 面板里看到的是同一个东西了。**
+
+- **新增第 4 种延迟口径「generate_204（同 clash）」，并设为默认**
+  - clash、mihomo、Shadowrocket、Surge 给节点测延迟都用 `https://www.gstatic.com/generate_204`。本工具现在走完全相同的路径：请求打到你的 Worker，Worker 内部 `fetch('https://www.gstatic.com/generate_204')` 拿那个 204，再原样回一个 204 给本工具。
+  - 所以你在本工具里看到的毫秒数，和你在 clash 里点「测延迟」看到的毫秒数，测的是同一条链路、同一个上游。
+  - 代价：需要 Worker 上装过 v2.0 的测速端点（`/__gen204`）、并且填了域名。没有就自动退回 TLS 握手口径，**不会因为拿不到 204 把 IP 判死**。
+- **Worker 片段新增 `/__gen204` 端点**（`worker_速度端点.js` 一键注入的就是它）
+  - 返回头 `X-G204-Status`（上游状态码，正常 204）、`X-Upstream-Ms`（Worker 出网回源耗时）。
+  - 实测 Worker 回源 gstatic 那一段只多花 **18~47ms**，可以忽略不计。
+- **四口径实测对照**（同一批 4 个 CF 边缘 IP、同一时刻）
+
+  | 口径 | 延迟范围 | 说明 |
+  |---|---|---|
+  | **generate_204（同 clash）** | **615 ~ 1163ms** | 端到端，四段全包含，和代理工具同口径 |
+  | TLS 握手 | 579 ~ 922ms | 只到 CF 边缘 TLS 握手 |
+  | TTFB | 197 ~ 287ms | 只到 CF 边缘吐首字节 |
+  | TCP 连接 | 0 ~ 10ms | **失真**：前面有网关级/透明代理时 SYN 被本地代答 |
+
+- **「TCP 连接」口径加警告**：这个数字经常是 0ms，因为它只到三次握手；如果你的网络前面有路由器级代理，SYN 会被本地代答，测出来完全是假数字。只适合排查「能不能连」。
+- **CLI 新增 `--delaymode w204`**（也接受 `gen204`、`gstatic` 两个别名），默认值改为 `w204`。帮助里补了说明。
+- **没填域名时自动降级**：`--delaymode w204` 但 `--domain` 为空 → 该 IP 的 w204 延迟记为 0，程序回退用 TLS 握手值，不判死。
+- **修掉 CLI 帮助里硬编码的版本号**：之前固定打印「版本：1.6」，与实际 exe 不符，现在跟 `APP_VERSION` 走。
+- 版本号 1.9 → 2.0
 
 ### v1.9
 
