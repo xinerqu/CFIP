@@ -1,363 +1,182 @@
 # worker_速度端点.js 使用说明
 
-这份文件只讲一件事：**怎么把这个 JS 片段加到你的 edgetunnel Worker 里，让 CFIP 能测「真实路径」的速度。**
+给你的 edgetunnel 加两个测速端点，让 CFIP优选 能测到「穿过你 Worker 回源」的真实速度，以及一个和 clash 面板同口径的延迟。
 
-不需要懂编程，照着做就行。全程大概三分钟。
-
----
-
-## 零、先看这里：v1.8 起可以一键注入，不用手贴
-
-**CFIP v1.8 起自带注入功能，你不需要自己找位置、腾空行、复制粘贴。**
-
-图形界面：点界面第五行的 **「给 Worker 一键加测速端点…」**，选你的 `_worker.js`（**`.txt` 也行**，把内容存进记事本就是 txt），程序在同目录生成 `原名_已注入` + 原扩展名（`.txt` 进 `.txt` 出，`.js` 进 `.js` 出）。你打开它全选复制，粘到 CF 控制台覆盖原代码，Deploy，完事。
-
-命令行：
-
-```bat
-cfip_gui.exe --inject C:\path\_worker.js
-```
-
-**本文下面的第二~七章是「手动粘贴」的完整流程**，保留下来是为了两个用途：
-
-1. 你想知道注入进去的到底是什么、为什么这么写
-2. 一键注入失败时的兜底手段
-
-如果你只想赶紧用上，看完这一节就可以直接跳到第八章「在 CFIP 里启用」。
+> **v1.8 起不用手贴了。** 打开 `cfip_gui.exe` → 菜单 **工具 → 给 Worker 加测速端点…** → 选你的 worker 文件 → 程序在同目录生成 `原名_已注入` → 全选复制粘进 CF → Deploy。
+>
+> 下面第二章起的手工流程只是备查（老版本工具、或想自己改片段时用）。
 
 ---
 
 ## 一、它是干什么的
 
-CFIP 默认测速是打 Cloudflare 自己的静态大文件（jsdelivr / unpkg 上的 wasm）。这条路径只经过「你 → CF 边缘」这一段，不会跑到外网去。
+装完后你的 Worker 多两个路径：
 
-而你真正翻墙时的路径长这样：
+| 端点 | 干什么 | 返回头 |
+|---|---|---|
+| `/__speed?mb=N` | 回源 Google 视频 CDN 拉一个大文件，边拉边流式返回 | `X-Speed-Bytes`<br>`X-Upstream-Mode`<br>`X-Upstream-Landed` |
+| `/__gen204` | Worker 内部 `fetch('https://www.gstatic.com/generate_204')` 再回 204 | `X-G204-Status`<br>`X-Upstream-Ms` |
 
-```
-你的电脑  ──①──>  CF 边缘节点（你选的优选 IP）  ──②──>  你的 Worker  ──③──>  YouTube / GitHub
-```
+为什么要绕这一圈：CFIP优选 直接测 jsdelivr/unpkg 上的静态文件，测到的是 **CF 自家的 CDN 缓存通道**，和你看 YouTube 走的 Worker `fetch` 出网通道完全不是一回事。加了这个端点，测速请求才会真的穿过「CF 边缘 → 你的 Worker → 外网」再回来。
 
-- **①** 是你唯一能优化的，选哪个 IP 就是优化这一段
-- **②** CF 内部网络，固定
-- **③** CF 回源到外网，**这一段常常才是瓶颈**
-
-只测 ① 得到的数字会虚高：你在 CFIP 里看到 200Mbps，刷 YouTube 却卡，就是因为 ③ 那段压根没被测到。
-
-加上这个片段之后，CFIP 会把测速请求打到你自己的 Worker 上的 `/__speed` 端点，让 Worker 去外网真拉一段数据再流式返回给你。这样测出来的数字就同时包含了 ① 和 ③ —— **才是你实际能用的速度**。
+代价是数字会变得很难看（静态源 200Mbps，真实路径常常 0.4~1.3Mbps），但那是真的。
 
 ---
 
-## 二、开始之前：fetch handler 是什么
+## 二、手工流程（备查）
 
-打开你的 `_worker.js`，开头十几行大概长这样：
+### 第一步：找到位置
+
+下载你的 worker 代码（CF 后台 → Workers & Pages → 你的 Worker → 编辑代码 → 全选复制）。edgetunnel 里大概是：
 
 ```js
 export default {
-  async fetch(request, env, ctx) {
-    let 请求URL文本 = request.url;
-    let url = new URL(请求URL文本);
-    ...
+	async fetch(request, env, ctx) {
+		// ← 就在这里，第十九行下面一行
+		let 请求URL文本 = request.url.replace(...);
 ```
 
-`async fetch(request, env, ctx) {` 这一行就是**入口函数**（行话叫 fetch handler）。Cloudflare 每收到一个请求，都会调用它一次，把请求当成 `request` 参数传进来。
+要找的是 `async fetch(request, env, ctx) {` 这一行**结尾的那个 `{`**。整段端点插在这个 `{` 的下一行。
 
-它下面那一长串 `if ... else if ... else if ...` 是在按路径分发：
+### 第二步：腾出一行空位
 
-```js
-if (访问路径 === 'version') {          // 访问 /version 时返回版本信息
-} else if (admin密码 && upgradeHeader === 'websocket') {   // WebSocket 代理
-} else if (admin密码 && ... POST) {    // gRPC / XHTTP 代理
-} else {                               // 其它，返回首页 / 登录页 / 管理页
-}
+光标放到 `{` 之后按一次回车，让原本的第 20 行变成第 21 行。**这一步是为了后面粘错了好回退**，不做也能粘。
+
+### 第三步：整块复制粘贴
+
+把 `worker_速度端点.js` 从头到尾（**连最外层的 `{ }`、连首尾的 `// ==== 测速端点开始/结束`===` 注释一起**）粘进那个空行。
+
+三个注意：
+
+- **不要只粘里面那半截**。片段最外层是一对 `{ }` 包着的裸块，不是 `if...else` 的一部分。少粘一层括号会把 `async fetch` 的函数体提前关掉，Deploy 时报 `SyntaxError: Unexpected token 'else'`
+- **原有代码一行都别动**。片段只新增，不修改
+- **缩进随便**。JS 不在乎，粘进去变丑不影响运行
+
+### 第四步：保存并部署
+
+点 Deploy。如果报 `SyntaxError`，八成是没粘全（少了最外层 `{` 或 `}`），删掉重粘。
+
+### 第五步：验证
+
+```bash
+curl "https://你的域名/__speed?mb=1" -o NUL -D -
 ```
 
-我们要做的，就是在**这一串 if 的最前面**插入一段自己的判断：如果访问的是 `/__speed`，就走测速逻辑，不再往下走。
+看响应头里有没有 `X-Speed-Bytes` 和 `X-Upstream-Mode`。有就成功了。
 
----
-
-## 三、第一步：找到位置
-
-用任何文本编辑器打开 `_worker.js`，搜索这个字符串：
-
-```
-async fetch(request, env, ctx) {
+```bash
+curl "https://你的域名/__gen204" -D -
 ```
 
-edgetunnel 官方版本里，这一行大约在**第 19 行**（不同版本会差几行，以搜索结果为准）。
+应该返回 `204`，头里有 `x-g204-status: 204` 和 `x-upstream-ms: 20` 左右。
 
----
-
-## 四、第二步：腾出一行空位
-
-把光标放到 `async fetch(request, env, ctx) {` 这一行的**行尾**，按一下回车。
-
-这样就在它下面多出一个空行，原来的第 20 行被挤到了第 21 行。
-
-> **为什么要按这一下？** 因为片段本身以 `{` 开头、以 `}` 结尾，它需要一个「干净的开头位置」。如果直接插在已有代码的行中间，很容易把原有结构弄断。
-
----
-
-## 五、第三步：整块复制粘贴
-
-打开 `worker_速度端点.js`，**全选、复制全部内容**，粘贴到你刚腾出来的那个空行上。
-
-粘贴完应该长这样：
-
-```js
-export default {
-  async fetch(request, env, ctx) {
-
-// ====================== 测速端点开始 ======================
-{
-  const 测速URL = new URL(request.url);
-  if (测速URL.pathname.toLowerCase() === '/__speed') {
-    ...
-  }
-}
-// ====================== 测速端点结束 ======================
-    let 请求URL文本 = request.url;     ← 原来第 20 行的内容，现在在片段下面
-    ...
-```
-
-### 三个注意事项
-
-1. **连最外层的 `{` 和 `}` 一起复制。** 不要只复制里面的 `if` 部分。外层那对大括号是把片段里的变量（`测速URL` 之类）关在一个局部作用域里，避免和你文件后面几万行里的同名变量打架。
-
-2. **首尾那两行注释也一起复制。** 它们标出了片段的边界，以后想删掉或者更新版本时，一眼就能找到范围。
-
-3. **原有代码一个字都不要改。** 这个片段是「独立 if 块」形态，不是接在原来的 `else if` 链后面，所以不需要动任何一个 `}`。这也是为什么它插在函数最前面最安全。
-
-> ### 为什么不是写成 `} else if (访问路径 === '__speed') {`
->
-> 那种写法的片段末尾自带一个 `}`，粘到原有 `} else if (...)` 前面就会变成 `}\n} else if` —— 多出来一个右括号，后面那个 `else` 成了孤儿，部署时直接报 `SyntaxError: Unexpected token 'else'`。
->
-> 现在这个版本刻意避开了这个坑：它自己带完整的大括号，插在函数第一个语句的位置，前后都不碰原有结构。
-
-### 关于缩进
-
-片段里的缩进可能和你文件的缩进风格不一致（有的是 2 空格，有的是 Tab）。**这不影响运行，不用管。** JS 不在乎缩进。
-
----
-
-## 六、第四步：保存并部署
-
-1. 保存 `_worker.js`
-2. 打开 Cloudflare Dashboard → Workers & Pages → 你的 Worker → 编辑代码
-3. 把改好的 `_worker.js` 全文粘进去（或者用 `wrangler deploy` 部署）
-4. 保存 / Deploy
-
-如果编辑器报语法错误，重点检查两件事：
-
-| 报错 | 原因 |
-|---|---|
-| `Unexpected token 'else'` | 说明你粘的是旧版 `else if` 形态的片段，换成现在这版独立 if 块 |
-| `Unexpected token '{'` | 片段最外层那对 `{ }` 没复制全，或复制了两遍 |
-| `Unexpected end of input` | 片段结尾的 `}` 漏了 |
-
----
-
-## 七、第五步：验证端点是否生效
-
-部署完等十几秒，然后在命令行里跑：
-
-```bat
-curl.exe -s -o NUL -D - --max-time 30 -r 0-1023 "https://你的域名/__speed?mb=1"
-```
-
-把 `你的域名` 换成你自己的域名（Worker 绑定的那个）。
-
-**成功的输出**长这样，重点看三行：
-
-```
-HTTP/1.1 200 OK
-X-Speed-Bytes: 1048576
-X-Upstream-Mode: gvt1-video-cdn
-X-Upstream-Landed: rr1---sn-oj5hn5-5t.gvt1.com
-```
-
-| 头 | 含义 |
-|---|---|
-| `X-Speed-Bytes` | 这次要返回多少字节（`mb=1` 就是 1048576） |
-| `X-Upstream-Mode` | 走的是哪条上游。`gvt1-video-cdn` = YouTube 视频 CDN（默认），`dl.google.com` = Google 静态下载 CDN（加了 `&u=dl` 时） |
-| `X-Upstream-Landed` | 实际落到了哪台服务器。正常情况下应该是 `rr*.gvt1.com` 或 `*.googlevideo.com` |
-
-### 排错表
+**看不到这两个头的三种情况**
 
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
-| `HTTP/1.1 404` 或返回 613 字节的 nginx 欢迎页 | 片段没生效 | 检查是不是粘到了 `fetch` 函数外面，或者没点 Deploy；也可以直接重跑一次一键注入 |
-| `code=000`（curl 直接超时） | 端点不存在或域名没绑好 | 先用 `curl https://你的域名/` 确认域名本身能访问 |
-| `HTTP/1.1 502` + 正文「上游全部失败」 | Worker 所在机房连不上 Google | 在 CFIP 里换一条回源线路（下拉选线路 2 或 3） |
-| `X-Upstream-Landed` 是 `dl.google.com` 但你没加 `u=dl` | 视频 CDN 三个候选全失败了，回退到了静态 CDN | 正常现象，能测但数值偏低，可以换线路重试 |
-| 部署时报 `Unexpected token 'else'` | 用了旧版手贴方法 | 用 v1.8 的一键注入重来 |
-
-### 其实不用手动查这些
-
-v1.8 起，工具自己会检查响应头里有没有 `X-Speed-Bytes` / `X-Upstream-Mode`，在「判定」列直接告诉你：
-
-| 判定列显示 | 含义 |
-|---|---|
-| `Worker 没加 /__speed 端点(613B页面)→ 先粘贴测速片段` | 端点不存在，去一键注入 |
-| `真实路径只回了 xxxxxB（上游短读，换一条回源线路）` | 端点生效了，上游只给了一点数据就断，换线路 |
-| `真实路径端点无数据(0B)：Worker 的 /__speed 没生效` | 通了但 0 字节，先换线路，一直 0B 就是机房出网问题 |
+| 返回 200 + 613 字节的 `Welcome to nginx!` | 片段没粘 / 没 Deploy / 粘到别的地方了 | 重来一遍 |
+| 返回 200 + 404 页面 | edgetunnel 把它当普通路径处理了 | 确认粘在 `async fetch(...) {` 的**第一行** |
+| 返回 500 / 1101 | 片段粘贴位置把原函数体切断了 | 删掉重粘，注意最外层 `{ }` |
 
 ---
 
-## 八、第六步：在 CFIP 里启用
+## 三、参数说明
 
-### 图形界面
-
-1. **域名(SNI/Host)** 填你自己的域名（就是刚才验证用的那个）
-2. **测速方式** 下拉选 `真实路径：走 Worker 回源（准）`（v1.6 默认就是它）
-3. **回源线路** 保持默认 `YouTube 视频CDN 1（ndk 781MB）`；如果大量短读或 502 就换下一个
-4. **测速Host / 测速路径** 两栏留空（程序会自动用 `/__speed?mb=50`）
-5. **超时ms** 改成 `5000`（回源路径首字节慢，1000ms 会把好 IP 全判死）
-6. 点「开始测试」
-
-### 命令行
-
-```bat
-cfip_gui.exe --cli --domain 你的域名.com --iplib 5 --ipcount 20 ^
-  --realpath --threads 1 --streams 2 --repeat 5 --timelimit 20 --timeout 5000
-```
-
----
-
-## 九、参数说明
-
-端点支持四个查询参数：
+`/__speed` 支持四个 URL 查询参数：
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `mb` | 50 | 要返回多少 MB，范围 1~200。测速时按你的「下载(s)」和带宽估个值，太大浪费额度，太小测不准 |
-| `u` | 空 | 写 `u=dl` 切换到 Google 静态下载 CDN（`dl.google.com`），用于对比 |
-| `n` | 0 | 选择视频 CDN 的第几个候选（0/1/2 循环）。默认 0 最稳 |
-| `token` | 空 | 如果你在 Worker 里设了环境变量 `SPEED_TOKEN`，必须带上 `&token=你的值`，否则 403 |
+| `mb` | 50 | 拉多少 MB，1~200。CFIP优选 默认给 200 |
+| `u` | 空 | 填 `dl` 换 Google 静态 CDN（`dl.google.com` 上的 chrome deb 包），更稳但更慢 |
+| `n` | 0 | 视频 CDN 候选轮转，0~2。短读或 502 时换一个 |
+| `token` | 空 | 只有你在 Worker 环境变量里设了 `SPEED_TOKEN` 才需要 |
 
-例：
-
-```
-/__speed?mb=20              20MB，走视频 CDN 第 1 候选
-/__speed?mb=20&u=dl         20MB，走 Google 静态 CDN
-/__speed?mb=20&n=1          20MB，走视频 CDN 第 2 候选
-```
+`/__gen204` 不接受参数，也不占下载额度。
 
 ---
 
-## 十、为什么这么设计（技术细节）
+## 四、为什么这么设计
 
-### 为什么用 `globalThis.fetch` 而不是 `fetch`
+**用 `globalThis.fetch` 而不是 `fetch`。** Worker 里 `fetch` 会被路由到本 Worker 的处理函数，直接调会自己请求自己。`globalThis.fetch` 拿的是运行时原始实现，才能真正出网。
 
-Worker 里直接写 `fetch(...)` 有可能被解析成「调用自己的 fetch handler」，形成递归。加 `globalThis.` 前缀就明确指向全局的 fetch，绕开自己的 handler。
+**为什么要手动截断。** Google 视频 CDN（`redirector.gvt1.com`）返回 302，跳转时会丢掉 `Range` 头，上游可能给你整个 781MB。所以拿到响应体后挂一个 `TransformStream`，数到 `mb` 字节就 `close()`，剩下的不再往下读。
 
-### 为什么要手动截断
+**为什么响应是 chunked 而不是 Content-Length。** 因为包了 `TransformStream`，CF 会强制改写 `Transfer-Encoding: chunked` 并丢掉 `Content-Length`。所以 CFIP优选 **不能**用 `Content-Length` 判断端点是否存在，改看 `X-Speed-Bytes`。
 
-`redirector.gvt1.com` 会 302 跳到 `*.googlevideo.com`，而**跳转过程中 Range 头会丢失**，上游可能一口气开始传整个 781MB 文件。
+**为什么三个视频 CDN 候选依次试。** 三个都是 `redirector.gvt1.com` 上的不同大小包（ndk-r27 781MB / emulator 412MB / build-tools 58MB），但不同机房的落地情况不一样，会短读或 302 循环。失败的换下一个。
 
-所以片段里挂了一个 `TransformStream`，边传边数：一旦发够你要的字节数就停止转发。这样既拿到了真实吞吐，又不会把 200MB 额度瞬间烧光。
-
-### 为什么响应是 chunked 而不是 Content-Length
-
-CF 在 `TransformStream` 后面会强制改成 `Transfer-Encoding: chunked`，即使你设了 `Content-Length` 也会被丢掉。所以 CFIP 判断「这一段收完了」不靠长度，而是靠 chunked 的结束标记 `0\r\n\r\n`。
-
-### 为什么三个视频 CDN 候选要依次试
-
-`redirector.gvt1.com` 背后的实际服务器由 Google 调度决定，某个机房可能连不上其中某一台。片段会依次尝试三个不同的大文件源，第一个成功就用，全失败才回退到静态 CDN。
-
-### 默认走视频 CDN 的原因
-
-看视频、刷网页，走的大多是 `*.googlevideo.com` 那张网。测这张网的速度，比测 `dl.google.com`（软件下载 CDN）更接近你刷 YouTube 的体感。
+**为什么默认走视频 CDN 不走静态 CDN。** 静态 CDN（`dl.google.com`）走的是 Google 自家的 CDN 边缘，离你近、有缓存，测出来的数会虚高；视频 CDN 走的是真实回源，更接近刷 YouTube 的实际体验。要更稳的结果就用 `u=dl`。
 
 ---
 
-## 十一、额度消耗
+## 五、额度消耗
 
-每次 `/__speed` 请求算 **1 次** Worker 请求（不是按字节算）。测 20 个 IP、每个重复 5 次、2 条流，一共 200 次请求，占免费额度（10 万次/天）的 0.2%。日常用完全不用担心。
+一次测速 = 一次 Worker 请求。免费版每天 10 万次。
 
-CPU 时间也不用担心：这个端点本质是「拉流 + 转发」，几乎不烧 CPU（免费版限 10ms/请求）。
+20 个 IP × 重复 3 次 = 60 次请求，占 0.06%。不用算着用。
 
----
-
-## 十二、常见问题
-
-**Q：加了这段会不会影响我正常翻墙？**
-
-不会。只有访问 `/__speed` 这一个路径时才走测速逻辑，其它所有请求原样走你原来的代理逻辑。片段插在最前面，判断完不匹配就直接往下走。
-
-**Q：以后更新 edgetunnel 怎么办？**
-
-新版 `_worker.js` 里没有这段，需要重新粘一次。位置还是 `async fetch(request, env, ctx) {` 下面。
-
-**Q：能不能用别人的域名测？**
-
-不行。`/__speed` 必须跑在**你自己的** Worker 上，因为它要调用你的 Worker 去回源。用别人的域名只能测到 ① 段（静态源模式）。
-
-**Q：测出来的数字比静态源低很多，是不是坏了？**
-
-正常。静态源（jsdelivr / unpkg）是 CF 自家 CDN，几乎零距离；而回源要跨太平洋去 Google，还要受免费 Worker 出口限速。0.5~2Mbps 是常见值，**这个低数字才是你真能用到的速度**。
-
-**Q：想测 YouTube 真实视频流（videoplayback）行不行？**
-
-不行。YouTube 的 `videoplayback` 直链需要签名参数 + PO Token，程序拿不到。现在用 `redirector.gvt1.com` 落地到 `*.googlevideo.com`，已经是无凭证情况下最接近的路径 —— 落地的服务器和 YouTube 视频分片是同一批。
+`/__speed` 的下载字节不消耗 Worker 额度，只消耗 CF 的出口流量（免费、无上限）。
 
 ---
 
-## 十三、粘贴被「编码」搞坏，是这里最容易踩的坑
+## 六、常见问题
 
-### 问题：`_worker.js` 末尾那一大段"乱码"是什么？
+**Q：装完 Worker 就打不开了，一直 1101？**
 
-不是加密，也不是混淆，**是一段超长的块注释，里面是希伯来文圣经原文**。
+片段粘错位置把 `async fetch` 的函数体切断了。删掉重粘，确保：①连最外层 `{ }` 一起粘；②粘在 `async fetch(request, env, ctx) {` 的**下一行**；③原有代码一个字没动。
 
-以 2026-11-10 那版 edgetunnel 为例：
+**Q：Deploy 报 `SyntaxError: Unexpected token 'else'`？**
 
-| 项目 | 数值 |
+片段最外层的 `}` 被漏掉了，导致原代码后半截的 `else if` 变成孤儿。重粘一次，从 `// ==== 测速端点开始 ====` 到 `结束 ====` 整段一起复制。
+
+**Q：`/__speed` 一直「上游短读」？**
+
+上游给了一点数据就断。换 `n=1` 或 `n=2` 换一个候选源，或者 URL 加 `u=dl` 走静态 CDN。CFIP优选 里就是「高级 → 回源线路」换一个。
+
+**Q：测速速度只有 1Mbps，正常吗？**
+
+正常。**CF 免费版 Worker 的 `fetch` 出网通道真实上限就是 1~2Mbps**，换什么上游都一样（实测 gvt1 和 dl.google.com 都在 0.5~1.7Mbps）。瓶颈在 Worker 出口，不在上游。
+
+**Q：`/__gen204` 是什么？**
+
+和 clash / mihomo / Shadowrocket 测节点延迟完全相同的路径：Worker 内部去 `fetch` gstatic 的 `generate_204`，拿到 204 就立刻回 204 给你。实测 Worker 回源那一段只多花 18~47ms，所以测出来的数和 clash 面板基本能对上。
+
+**Q：为什么 `/__speed` 不占下载额度？**
+
+`X-Speed-Bytes` 这个头就够了，不需要真的把 200MB 全下发。CFIP优选 读到够用的字节就断开。
+
+---
+
+## 七、编码：这里最容易踩的坑
+
+### `_worker.js` 末尾那一大段"乱码"是什么
+
+不是加密，是**一个超长块注释**：从 `/*` 开始，内容是希伯来文圣经原文（Genesis 到历代志下），到 `*/` 结束。4.7MB，占全文件 93%。
+
+**它对运行没有影响**，删掉程序照跑。但会让 CF 编辑器很卡、粘贴很慢、更容易粘漏。想瘦身就把那段 `/* ... */` 整段删掉。
+
+### 编码会不会影响 js？会，而且是致命的
+
+edgetunnel 里有大量**中文变量名**（`缓存SOCKS5白名单`、`调试日志打印` 等），这些名字对编码极其敏感。实测：
+
+| 保存成 | 结果 |
 |---|---|
-| 全文件 | 5,142,649 字节 / 33,158 行 |
-| 末尾块注释 | 从 **第 6661 行的 `/*`** 开始，到 **第 33158 行的 `*/`** 结束 |
-| 这段的长度 | **26,498 行 / 4,827,386 字节 ≈ 4714 KB，占全文件 93%** |
-| 去掉它之后 | 只剩 **308 KB** |
-| 内容 | `Genesis`、`בראשית`、`Tanach with Nikkud`、`http://www.tanach.us/Tanach.xml`，然后是创世记到历代志下的原文 |
+| UTF-8（带或不带 BOM） | ✅ 正常 |
+| ANSI / GBK（记事本默认就是它！） | ❌ `SyntaxError: Invalid or unexpected token` |
+| UTF-16 LE（记事本里的「Unicode」） | ❌ 同样报错 |
 
-它包在 `/* ... */` 里，JavaScript 引擎会整段跳过，**对运行没有任何影响**。edgetunnel 的作者放它是为了「撑大文件体积」—— 有些免费 CDN / Pages 的缓存策略对大文件更宽松，也有人用它来规避基于文件大小的特征检测。你不必关心它，但要知道它在。
-
-> 想瘦身：把从单独一行的 `/*`（第 6661 行）到最后 ` */`（第 33158 行）整段删掉，文件从 5MB 变成 308KB，粘贴和部署都会快很多，功能一点不少。
-
-### 问题：编码会影响 js 的结果吗？——会，而且是致命的
-
-用记事本另存 `.js` 的时候，如果"编码"选错了，文件直接就废了。实测（`node --check` 逐个验证）：
-
-| 保存方式 | 记事本里的选项 | 结果 |
-|---|---|---|
-| UTF-8 带 BOM | 「UTF-8」/「UTF-8 带 BOM」 | ✅ 通过 |
-| UTF-8 无 BOM | 「UTF-8」（新版记事本） | ✅ 通过 |
-| **GB18030 / GBK** | 「ANSI」（中文系统就是这个） | ❌ `SyntaxError: Invalid or unexpected token` |
-| **UTF-16 LE** | 「Unicode」 | ❌ `SyntaxError: Invalid or unexpected token` |
-
-为什么 GBK 一定坏：edgetunnel 的源码里**大量使用中文变量名**（`缓存SOCKS5白名单`、`调试日志打印`、`WS早期数据最大字节`……）。存成 GBK 之后，这些标识符的字节序列已经不是合法 UTF-8，浏览器/CF 编辑器按 UTF-8 解析就会得到一串 `����`，第一行 `let config_JSON, 缓存SOCKS5白名单 = null` 直接报错。
-
-更隐蔽的一种：文件本来是 UTF-8，但记事本**猜错编码**把它按 GBK 读进来又存回去 —— 会得到典型的「锘縞onst Version = ...」「缂撳瓨SOCKS5鐧藉悕鍗?」这种乱码，`?` 出现几千次，同样部署失败。
+记事本「另存为」时编码默认是 ANSI，中文系统上就是 GBK，直接粘上去必然部署失败。
 
 ### 本程序怎么处理
 
-**v1.8 的注入功能会自动识别并转码，你不用管编码**：
+`cfip_gui.exe` 读文件时会看 BOM：
 
-1. 读入时先查 BOM：`EF BB BF` = UTF-8，`FF FE` = UTF-16LE。
-2. 没有 BOM 就做完整的 UTF-8 合法性校验。
-3. **校验不通过 → 判定为 ANSI/GBK → 自动用系统代码页解码再转成 UTF-8**，然后才注入。
-4. 注入完在提示里告诉你原文件是什么编码、已经转成 UTF-8 了。
+- 有 UTF-16LE BOM → 转成 UTF-8
+- 有 UTF-8 BOM → 保留
+- 没有 BOM → 做一次 UTF-8 合法性校验，**不通过就判定为 ANSI/GBK，自动转成 UTF-8** 再注入
 
-所以你哪怕是用记事本「另存为 ANSI」存过的 `_worker.js`，直接丢给「给 Worker 一键加测速端点…」也是好的，出来的新文件一定是 UTF-8。
+注入完成的提示里会写原文件是什么编码、已经转成什么。**所以用记事本存成 ANSI 也没关系，程序会救回来。**
 
-> 提醒：手动复制粘贴的流程没有这层保护。如果你坚持手贴，请务必确认编辑器右下角显示的是 **UTF-8**，别用「ANSI」。VS Code 里按 `Ctrl+Shift+P` → `Change File Encoding` → `Save with Encoding` → `UTF-8` 最稳。
+### 也不用非得存成 `.js`
 
----
-
-## 十四、也不用非得存成 `.js`
-
-很多人只是把 CF 编辑器里的代码复制到记事本，得到的是一个 `.txt`。以前还得先改名成 `.js` 才能在一键注入的文件框里看到它 —— 现在不用了：
-
-- 文件类型下拉第一项就是 `Worker 脚本 (*.js;*.txt)`，`.js` 和 `.txt` 一起显示
-- 其他后缀（比如 `.bak`、`.code`）切到「所有文件」也能选
-- **输出扩展名跟着输入走**：`worker.txt` → `worker_已注入.txt`，`_worker.js` → `_worker_已注入.js`，没有扩展名则补 `.js`
-
-这样你打开输出文件、全选复制、粘回 CF 就行，中间不用管扩展名对不对。
+记事本存 `.txt` 一样能注入，程序输出扩展名跟着输入走（`.txt` → `_已注入.txt`）。CF 后台粘代码不看扩展名。
